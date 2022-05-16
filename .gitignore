@@ -12,6 +12,8 @@ run_scripts/caption/moe_stage1_checkpoints
 run_scripts/caption/moe_int_stage1_checkpoints
 run_scripts/caption/moe_only_encoder_stage1_checkpoints
 run_scripts/caption/moe_only_decoder_stage1_checkpoints
+run_scripts/caption/moe_de_final_layer_stage1_checkpoints
+run_scripts/caption/moe_ende_final_layer_stage1_checkpoints
 run_scripts/glue/checkpoints
 run_scripts/glue/logs
 run_scripts/snli_ve/base_checkpoints

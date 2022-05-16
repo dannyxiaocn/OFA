@@ -85,7 +85,7 @@ for max_epoch in {6,}; do
           --fixed-validation-seed=7 \
           --no-epoch-checkpoints --keep-best-checkpoints=1 \
           --save-interval=1 --validate-interval=1 \
-          --save-interval-updates=5000 --validate-interval-updates=5000 \
+          --save-interval-updates=4000 --validate-interval-updates=2000 \
           --eval-cider \
           --eval-cider-cached-tokens=${eval_cider_cached} \
           --eval-args='{"beam":1,"max_len_b":16,"no_repeat_ngram_size":3}' \
