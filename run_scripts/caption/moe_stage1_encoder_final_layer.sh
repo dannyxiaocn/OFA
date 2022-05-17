@@ -2,10 +2,10 @@
 
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
-export MASTER_PORT=8051
+export MASTER_PORT=2051
 
-log_dir=./moe_ende_final_layer_stage1_logs
-save_dir=./moe_ende_final_layer_stage1_checkpoints
+log_dir=./moe_en_final_layer_stage1_logs
+save_dir=./moe_en_final_layer_stage1_checkpoints
 mkdir -p $log_dir $save_dir
 
 bpe_dir=../../utils/BPE
@@ -52,7 +52,7 @@ for max_epoch in {2,}; do
       save_path=${save_dir}/${max_epoch}"_"${warmup_ratio}"_"${drop_worst_after}"_"${moe_gate_loss_wt}"_"${lr}
       mkdir -p $save_path
 
-      CUDA_VISIBLE_DEVICES=2 python3 -m torch.distributed.launch --nproc_per_node=1 --master_port=${MASTER_PORT} ../../train.py \
+      CUDA_VISIBLE_DEVICES=1 python3 -m torch.distributed.launch --nproc_per_node=1 --master_port=${MASTER_PORT} ../../train.py \
           $data \
           --selected-cols=${selected_cols} \
           --bpe-dir=${bpe_dir} \
@@ -100,9 +100,9 @@ for max_epoch in {2,}; do
           --scale-fc \
           --scale-heads \
           --moe-expert-count=4 \
-          --moe-freq=6 \
+          --moe-freq=0 \
           --encoder-moe-freq=6 \
-          --decoder-moe-freq=6 \
+          --decoder-moe-freq=0 \
           --moe-gating-use-fp32 \
           --moe-second-expert-policy=${moe_second_expert_policy} \
           --moe-normalize-gate-prob-before-dropping \

@@ -326,7 +326,8 @@ class AdjustLabelSmoothedMOECrossEntropyCriterion(FairseqCriterion):
             constraint_start=self.constraint_start,
             constraint_end=self.constraint_end
         )
-        inner_loss = loss
+        inner_loss = 0
+        inner_loss = inner_loss + loss
 
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
@@ -384,6 +385,7 @@ class AdjustLabelSmoothedMOECrossEntropyCriterion(FairseqCriterion):
         sample_size_v2 = sum(log.get("sample_size_v2", 0) for log in logging_outputs)
         # logger.info('DEBUG: Pass criterion reduce metrix OFA mingming part')
         # MoE Adaptation
+        inner_loss = sum(log.get("inner_loss", 0) for log in logging_outputs)
         moe_loss_sum = sum(log.get("moe_loss", 0) for log in logging_outputs)
 
         # logger.info('DEBUG: Pass criterion reduce metrix MoE mingming part')
@@ -418,16 +420,12 @@ class AdjustLabelSmoothedMOECrossEntropyCriterion(FairseqCriterion):
         metrics.log_scalar(
             "sample_size", sample_size, 1, round=3
         )
-        metrics.log_scalar(
-            "sample_size_v1", sample_size_v1, 1, round=3
-        )
-        metrics.log_scalar(
-            "sample_size_v2", sample_size_v2, 1, round=3
-        )
         # logger.info('DEBUG: Pass criterion reduce metrix OFA Part')
-
         metrics.log_scalar(
-            "moe_gate_loss", moe_loss_sum / sample_size, sample_size, round=8
+            "inner_loss", inner_loss / sample_size, sample_size, round=3
+        )
+        metrics.log_scalar(
+            "moe_gate_loss", moe_loss_sum / sample_size, sample_size, round=3
         )
         # logger.info('DEBUG: Pass criterion reduce metrix FIRST chunk')
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))

@@ -2,7 +2,7 @@
 
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
-export MASTER_PORT=1052
+export MASTER_PORT=2052
 
 log_dir=./moe_stage2_logs
 save_dir=./moe_stage2_checkpoints
@@ -13,7 +13,7 @@ user_dir=../../ofa_module
 
 data_dir=../../dataset/caption_data
 data=${data_dir}/caption_stage2_train.tsv,${data_dir}/caption_val.tsv
-restore_file=./moe_stage1_checkpoints/10_0.06_2500/checkpoint_best-rank-0.pt
+restore_file=./moe_only_encoder_stage1_checkpoints/10_0.06_2500/checkpoint_best.pt
 selected_cols=1,4,2
 
 task=caption
@@ -23,7 +23,7 @@ label_smoothing=0.1
 lr=1e-7
 max_epoch=5
 warmup_ratio=0.06
-batch_size=4
+batch_size=2
 update_freq=4
 resnet_drop_path_rate=0.0
 encoder_drop_path_rate=0.0
@@ -76,7 +76,7 @@ for lr in {1e-5,}; do
         --decoder-drop-path-rate=${decoder_drop_path_rate} \
         --dropout=${dropout} \
         --attention-dropout=${attention_dropout} \
-        --weight-decay=0.01 --optimizer=adam --adam-betas="(0.9,0.999)" --adam-eps=1e-08 --clip-norm=1.0 \
+        --weight-decay=0.01 --optimizer=adam --adam-betas="(0.9,0.999)" --adam-eps=1e-08 --clip-norm=0.0 \
         --lr-scheduler=polynomial_decay --lr=${lr} --end-learning-rate=2e-7 \
         --max-epoch=${max_epoch} --warmup-ratio=${warmup_ratio} \
         --log-format=simple --log-interval=10 \
@@ -100,6 +100,9 @@ for lr in {1e-5,}; do
         --scale-heads \
         --moe-expert-count=4 \
         --moe-gating-use-fp32 \
+        --moe-freq=0 \
+        --encoder-moe-freq=2 \
+        --decoder-moe-freq=0 \
         --moe-second-expert-policy=${moe_second_expert_policy} \
         --moe-normalize-gate-prob-before-dropping \
         --moe-top1-expert \

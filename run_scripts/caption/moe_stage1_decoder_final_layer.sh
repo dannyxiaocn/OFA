@@ -20,11 +20,11 @@ task=caption
 arch=ofa_moe_base
 criterion=adjust_label_smoothed_moe_cross_entropy
 label_smoothing=0.1
-lr=1e-5
+lr=2e-5
 max_epoch=5
 warmup_ratio=0.06
 batch_size=8
-update_freq=4
+update_freq=8
 resnet_drop_path_rate=0.0
 encoder_drop_path_rate=0.1
 decoder_drop_path_rate=0.1
@@ -41,7 +41,7 @@ moe_combine_method="sum"
 moe_second_expert_policy="all"
 moe_normalize_expert_grad="sqrt_world_size"
 
-for max_epoch in {6,}; do
+for max_epoch in {2,}; do
   echo "max_epoch "${max_epoch}
   for warmup_ratio in {0.06,}; do
     echo "warmup_ratio "${warmup_ratio}
@@ -85,7 +85,7 @@ for max_epoch in {6,}; do
           --fixed-validation-seed=7 \
           --no-epoch-checkpoints --keep-best-checkpoints=1 \
           --save-interval=1 --validate-interval=1 \
-          --save-interval-updates=4000 --validate-interval-updates=2000 \
+          --save-interval-updates=2000 --validate-interval-updates=2000 \
           --eval-cider \
           --eval-cider-cached-tokens=${eval_cider_cached} \
           --eval-args='{"beam":1,"max_len_b":16,"no_repeat_ngram_size":3}' \
