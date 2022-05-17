@@ -205,7 +205,7 @@ class TransformerEncoderLayer(nn.Module):
         args (argparse.Namespace): parsed command-line arguments
     """
 
-    def __init__(self, args, drop_path_rate=0.0, is_moe_layer=False):
+    def __init__(self, args, drop_path_rate=0.0, is_moe_layer=False, is_shared_moe=None):
         super().__init__()
         self.args = args
         self.embed_dim = args.encoder_embed_dim
@@ -218,10 +218,11 @@ class TransformerEncoderLayer(nn.Module):
             args.dropout, module_name=self.__class__.__name__
         )
         self.is_moe_layer = is_moe_layer
+        self.shared_moe = None
         if self.is_moe_layer and getattr(args, "alternate_ffn_embed_dim", 0.0) > 0:
             self.ffn_dim = getattr(args, "alternate_ffn_embed_dim", 0.0)
         self.normalize_before = args.encoder_normalize_before
-        if not self.is_moe_layer or getattr(args, "alternate_ffn_embed_dim", 0.0) > 0:
+        if not is_shared_moe and not self.is_moe_layer or getattr(args, "alternate_ffn_embed_dim", 0.0) > 0:
             self.activation_fn = utils.get_activation_fn(
                 activation=getattr(args, 'activation_fn', 'relu') or "relu"
             )
@@ -245,7 +246,7 @@ class TransformerEncoderLayer(nn.Module):
                 self.quant_noise,
                 self.quant_noise_block_size,
             )
-        else:
+        elif not is_shared_moe:
             if args.moe_top1_expert:
                 gate = Top1Gate(
                     self.embed_dim,
@@ -266,7 +267,8 @@ class TransformerEncoderLayer(nn.Module):
             experts = make_experts(args, self.embed_dim, self.ffn_dim, self.dropout_module)
             self.moe_layer = MOELayer(gate, experts, args)
             # self.doe = Dummy_layer(self.embed_dim, args.encoder_ffn_embed_dim, self.activation_fn, self.ffn_layernorm, self.activation_dropout_module, self.dropout_module, self.quant_noise, self.quant_noise_block_size)        
-
+        else:
+            self.shared_moe = is_shared_moe
         self.attn_ln = LayerNorm(self.embed_dim) if getattr(args, 'scale_attn', False) else None
         self.nh = self.self_attn.num_heads
         self.head_dim = self.self_attn.head_dim
@@ -344,8 +346,6 @@ class TransformerEncoderLayer(nn.Module):
         fc2_weights = state_dict["{}.fc2.weight".format(name)]
         fc1_bias = state_dict["{}.fc1.bias".format(name)]
         fc2_bias = state_dict["{}.fc2.bias".format(name)]
-        ffn_weights = state_dict["{}.ffn_layernorm.weight".format(name)]
-        ffn_bias = state_dict["{}.ffn_layernorm.bias".format(name)]
 
         # copy fc1, fc2 + noise
         for i in range(n_experts):
@@ -358,8 +358,6 @@ class TransformerEncoderLayer(nn.Module):
         del state_dict["{}.fc2.weight".format(name)]
         del state_dict["{}.fc1.bias".format(name)]
         del state_dict["{}.fc2.bias".format(name)]
-        del state_dict["{}.ffn_layernorm.weight".format(name)]
-        del state_dict["{}.ffn_layernorm.bias".format(name)]
 
         
     def upgrade_state_dict_named(self, state_dict, name):
@@ -381,8 +379,14 @@ class TransformerEncoderLayer(nn.Module):
                     ] = self.state_dict()["{}.{}".format(new, m)]
 
         moe_checker = "{}.moe_layer.gate.wg.weight".format(name)
-        if moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
+        if not self.shared_moe and moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
             self.moe_checkpoint_loader(name, state_dict)
+        else:
+            del state_dict["{}.fc1.weight".format(name)]
+            del state_dict["{}.fc2.weight".format(name)]
+            del state_dict["{}.fc1.bias".format(name)]
+            del state_dict["{}.fc2.bias".format(name)]
+
         # if "{}.doe.fc1.weight".format(name) not in state_dict and "doe.fc1.weight" in self.state_dict():
         #     self.doe_checkpoint_loader(name, state_dict)
 
@@ -449,7 +453,7 @@ class TransformerEncoderLayer(nn.Module):
         if self.normalize_before:
             x = self.final_layer_norm(x)
         
-        if not self.is_moe_layer or getattr(self.args, "alternate_ffn_embed_dim", 0.0) > 0:
+        if not self.shared_moe and not self.is_moe_layer or getattr(self.args, "alternate_ffn_embed_dim", 0.0) > 0:
             x = self.activation_fn(self.fc1(x))
             x = self.activation_dropout_module(x)
             if self.ffn_layernorm is not None:
@@ -457,12 +461,19 @@ class TransformerEncoderLayer(nn.Module):
             x = self.fc2(x)
             x = self.dropout_module(x)
             l_aux = None
-        else:
+        elif not self.shared_moe:
             x = x.transpose(0, 1) # batch_size, seq_len, model_dim
             if getattr(self.args, "use_moe_pad_mask", False):
                 x, l_aux = self.moe_layer(x, input_padding_mask=encoder_padding_mask)
             else:
                 x, l_aux = self.moe_layer(x)
+            x = x.transpose(0, 1) # seq_len, batch_size, model_dim
+        else:
+            x = x.transpose(0, 1) # batch_size, seq_len, model_dim
+            if getattr(self.args, "use_moe_pad_mask", False):
+                x, l_aux = self.shared_moe(x, input_padding_mask=encoder_padding_mask)
+            else:
+                x, l_aux = self.shared_moe(x)
             x = x.transpose(0, 1) # seq_len, batch_size, model_dim
 
         if self.w_resid is not None:
@@ -491,11 +502,12 @@ class TransformerDecoderLayer(nn.Module):
     """
 
     def __init__(
-        self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False, drop_path_rate=0.0, is_moe_layer=False
+        self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False, drop_path_rate=0.0, is_moe_layer=False, is_shared_moe=None
     ):
         super().__init__()
         self.args = args
         self.is_moe_layer = is_moe_layer
+        self.shared_moe = None
         self.embed_dim = args.decoder_embed_dim
         self.ffn_dim = args.decoder_ffn_embed_dim
         self.dropout_module = FairseqDropout(
@@ -536,7 +548,7 @@ class TransformerDecoderLayer(nn.Module):
         if self.is_moe_layer and getattr(args, "alternate_decoder_ffn_embed_dim", 0.0) > 0:
             self.ffn_dim = getattr(args, "alternate_decoder_ffn_embed_dim", 0.0)
 
-        if not self.is_moe_layer or getattr(args, "alternate_decoder_ffn_embed_dim", 0.0) > 0:
+        if not is_shared_moe and not self.is_moe_layer or getattr(args, "alternate_decoder_ffn_embed_dim", 0.0) > 0:
             self.activation_fn = utils.get_activation_fn(
                 activation=str(args.activation_fn)
                 if getattr(args, "activation_fn", None) is not None
@@ -561,7 +573,8 @@ class TransformerDecoderLayer(nn.Module):
                 self.quant_noise,
                 self.quant_noise_block_size,
             )
-        else:
+        elif not is_shared_moe:
+            print("asdasd")
             if args.moe_top1_expert:
                 gate = Top1Gate(
                     self.embed_dim,
@@ -581,7 +594,9 @@ class TransformerDecoderLayer(nn.Module):
                 )
             experts = make_experts(args, self.embed_dim, self.ffn_dim, self.dropout_module)
             self.moe_layer = MOELayer(gate, experts, args)
-
+        else:
+            
+            self.shared_moe = is_shared_moe
         self.normalize_before = args.decoder_normalize_before
         self.final_layer_norm = LayerNorm(self.embed_dim, export=export)
         self.need_attn = True
@@ -773,7 +788,7 @@ class TransformerDecoderLayer(nn.Module):
         if self.normalize_before:
             x = self.final_layer_norm(x)
 
-        if not self.is_moe_layer or getattr(self.args, "alternate_decoder_ffn_embed_dim", 0.0) > 0:
+        if not self.shared_moe and not self.is_moe_layer or getattr(self.args, "alternate_decoder_ffn_embed_dim", 0.0) > 0:
             x = self.activation_fn(self.fc1(x))
             x = self.activation_dropout_module(x)
             if self.ffn_layernorm is not None:
@@ -781,13 +796,20 @@ class TransformerDecoderLayer(nn.Module):
             x = self.fc2(x)
             x = self.dropout_module(x)
             l_aux = None
-        else:
+        elif not self.shared_moe:
             # x - seq_len, batch_size, model_dim
             x = x.transpose(0, 1) # batch_size, seq_len, model_dim
             if getattr(self.args, "use_moe_pad_mask", False):
                 x, l_aux = self.moe_layer(x, input_padding_mask=self_attn_padding_mask)
             else:
                 x, l_aux = self.moe_layer(x)
+            x = x.transpose(0, 1)
+        else:
+            x = x.transpose(0, 1) # batch_size, seq_len, model_dim
+            if getattr(self.args, "use_moe_pad_mask", False):
+                x, l_aux = self.shared_moe(x, input_padding_mask=self_attn_padding_mask)
+            else:
+                x, l_aux = self.shared_moe(x)
             x = x.transpose(0, 1)
 
         if self.w_resid is not None:
@@ -838,8 +860,6 @@ class TransformerDecoderLayer(nn.Module):
         fc2_weights = state_dict["{}.fc2.weight".format(name)]
         fc1_bias = state_dict["{}.fc1.bias".format(name)]
         fc2_bias = state_dict["{}.fc2.bias".format(name)]
-        ffn_weights = state_dict["{}.ffn_layernorm.weight".format(name)]
-        ffn_bias = state_dict["{}.ffn_layernorm.bias".format(name)]
 
         # copy fc1, fc2 + noise
         for i in range(n_experts):
@@ -852,8 +872,6 @@ class TransformerDecoderLayer(nn.Module):
         del state_dict["{}.fc2.weight".format(name)]
         del state_dict["{}.fc1.bias".format(name)]
         del state_dict["{}.fc2.bias".format(name)]
-        del state_dict["{}.ffn_layernorm.weight".format(name)]
-        del state_dict["{}.ffn_layernorm.bias".format(name)]
 
 
     def upgrade_state_dict_named(self, state_dict, name):
@@ -882,8 +900,13 @@ class TransformerDecoderLayer(nn.Module):
                     ] = self.state_dict()["{}.{}".format(new, m)]
 
         moe_checker = "{}.moe_layer.gate.wg.weight".format(name)
-        if moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
+        if not self.shared_moe and moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
             self.moe_checkpoint_loader(name, state_dict)
+        else:
+            del state_dict["{}.fc1.weight".format(name)]
+            del state_dict["{}.fc2.weight".format(name)]
+            del state_dict["{}.fc1.bias".format(name)]
+            del state_dict["{}.fc2.bias".format(name)]
         # if "{}.doe.fc1.weight".format(name) not in state_dict and "doe.fc1.weight" in self.state_dict():
         #     self.doe_checkpoint_loader(name, state_dict)
 

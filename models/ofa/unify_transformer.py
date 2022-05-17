@@ -6,11 +6,13 @@ import functools
 import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
-
+from fairseq.modules.quant_noise import quant_noise
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fairseq import utils
+from fairseq.modules.moe import Top1Gate, Top2Gate, MOELayer
+from fairseq.modules.fused_bias_gelu import fused_bias_gelu, has_fused_bias_gelu
 from fairseq.distributed import utils as dist_utils, fsdp_wrap
 from fairseq.models import (
     FairseqEncoder,
@@ -284,6 +286,10 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='Frequency at which we insert MoE Transformer decoder layers')
         parser.add_argument('--moe-expert-count', type=int, metavar='D', default=2,
                             help='Number of experts in each MoE Layer')
+        parser.add_argument('--moe-encoder-expert-count', type=int, metavar='D', default=4,
+                            help='Number of experts in each encoder MoE Layer')
+        parser.add_argument('--moe-decoder-expert-count', type=int, metavar='D', default=4,
+                            help='Number of experts in each decoder MoE Layer')
         parser.add_argument('--moe-gating-use-fp32', default=True, action='store_true',
                             help="Use FP32 computations in MoE top2 gating function")
         parser.add_argument('--moe-second-expert-policy', type=str, default='sampling',
@@ -292,7 +298,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help="whether to normalize gate probs before or after dropping experts for capacity and randomization")
         parser.add_argument('--moe-expert-ffn-dim', type=int, default=0,
                             help="MoE Expert FFN dimension")
-        parser.add_argument('--moe-top1-expert', default=True, action='store_true',
+        parser.add_argument('--moe-top1-expert', default=False, action='store_true',
                             help="Use top1 gate instead of top2")
         parser.add_argument('--moe-eval-capacity-token-fraction', type=float, default=0.25,
                             help="Fraction of tokens as capacity during validation" + \
@@ -529,12 +535,31 @@ class TransformerEncoder(FairseqEncoder):
             self.layers = nn.ModuleList([])
 
         dpr = [x.item() for x in torch.linspace(0, args.encoder_drop_path_rate, args.encoder_layers)]
-        moe_freq = max(getattr(args, 'encoder_moe_freq', 0), getattr(args, 'moe_freq', 0))
+        if getattr(args, 'moe_encoder_expert_count', 4): is_shared_moe = None
+        else: 
+            if args.moe_top1_expert:
+                gate = Top1Gate(
+                    args.encoder_embed_dim,
+                    max(args.moe_expert_count, args.moe_encoder_expert_count),
+                    use_fp32=args.moe_gating_use_fp32,
+                    moe_eval_capacity_token_fraction=getattr(args, "moe_eval_capacity_token_fraction", 0.25),
+                )
+            else:
+                gate = Top2Gate(
+                    self.encoder_embed_dim,
+                    max(args.moe_expert_count, args.moe_encoder_expert_count),
+                    args.moe_gating_use_fp32,
+                    args.moe_second_expert_policy,
+                    args.moe_normalize_gate_prob_before_dropping,
+                    getattr(args, "moe_eval_capacity_token_fraction", 0.25),
+                    getattr(args, "moe_batch_prioritized_routing", False),
+                )
+            experts = make_experts(args, args.encoder_embed_dim, args.encoder_ffn_embed_dim, FairseqDropout(args.dropout, module_name=self.__class__.__name__))
+            is_shared_moe = MOELayer(gate, experts, args)
+        self.shared_moe = is_shared_moe
         for i in range(args.encoder_layers):
-            is_moe_layer = moe_freq != 0 and (i + 1) % moe_freq == 0
-            self.layers.append(self.build_encoder_layer(args, is_moe_layer=is_moe_layer))
+            self.layers.append(self.build_encoder_layer(args, is_moe_layer=True, is_shared_moe=self.shared_moe))
         self.num_layers = len(self.layers)
-
         if args.encoder_normalize_before:
             self.layer_norm = LayerNorm(embed_dim)
         else:
@@ -567,8 +592,8 @@ class TransformerEncoder(FairseqEncoder):
                     m.weight.requires_grad = False
                     m.bias.requires_grad = False
 
-    def build_encoder_layer(self, args, drop_path_rate=0.0, is_moe_layer=False):
-        layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, is_moe_layer=is_moe_layer)
+    def build_encoder_layer(self, args, drop_path_rate=0.0, is_moe_layer=False, is_shared_moe=None):
+        layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, is_moe_layer=is_moe_layer, is_shared_moe=is_shared_moe)
         checkpoint = getattr(args, "checkpoint_activations", False)
         if checkpoint:
             offload_to_cpu = getattr(args, "offload_activations", False)
@@ -1065,12 +1090,32 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layers = nn.ModuleList([])
 
         dpr = [x.item() for x in torch.linspace(0, args.decoder_drop_path_rate, args.decoder_layers)]
-        moe_freq = max(getattr(args, 'decoder_moe_freq', 0), getattr(args, 'moe_freq', 0))
+        if getattr(args, 'moe_decoder_expert_count', 4) == 0: is_shared_moe = None
+        else: 
+            if args.moe_top1_expert:
+                gate = Top1Gate(
+                    args.decoder_embed_dim,
+                    args.moe_decoder_expert_count,
+                    use_fp32=args.moe_gating_use_fp32,
+                    moe_eval_capacity_token_fraction=getattr(args, "moe_eval_capacity_token_fraction", 0.25),
+                )
+            else:
+                gate = Top2Gate(
+                    args.decoder_embed_dim,
+                    args.moe_decoder_expert_count,
+                    args.moe_gating_use_fp32,
+                    args.moe_second_expert_policy,
+                    args.moe_normalize_gate_prob_before_dropping,
+                    getattr(args, "moe_eval_capacity_token_fraction", 0.25),
+                    getattr(args, "moe_batch_prioritized_routing", False),
+                )
+            experts = make_experts(args, args.decoder_embed_dim, args.decoder_ffn_embed_dim, FairseqDropout(args.dropout, module_name=self.__class__.__name__))
+            is_shared_moe = MOELayer(gate, experts, args)
+        self.shared_moe = is_shared_moe
         for i in range(args.decoder_layers):
-            is_moe_layer = moe_freq != 0 and (i + 1) % moe_freq == 0
             self.layers.append(
                 self.build_decoder_layer(
-                    args, no_encoder_attn=no_encoder_attn, is_moe_layer=is_moe_layer,
+                    args, no_encoder_attn=no_encoder_attn, is_moe_layer=True, is_shared_moe=self.shared_moe
                 )
             )
         self.num_layers = len(self.layers)
@@ -1144,8 +1189,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         for i in range(num_base_layers):
             self.layers.insert(((i+1) * args.decoder_layers) // (num_base_layers + 1), BaseLayer(args))
 
-    def build_decoder_layer(self, args, no_encoder_attn=False, drop_path_rate=0.0, is_moe_layer=False):
-        layer = TransformerDecoderLayer(args, no_encoder_attn, drop_path_rate=drop_path_rate, is_moe_layer=is_moe_layer)
+    def build_decoder_layer(self, args, no_encoder_attn=False, drop_path_rate=0.0, is_moe_layer=False, is_shared_moe=None):
+        layer = TransformerDecoderLayer(args, no_encoder_attn, drop_path_rate=drop_path_rate, is_moe_layer=is_moe_layer, is_shared_moe=is_shared_moe)
         checkpoint = getattr(args, "checkpoint_activations", False)
         if checkpoint:
             offload_to_cpu = getattr(args, "offload_activations", False)
@@ -1535,6 +1580,115 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
+def _linear(x, weight, bias=None):
+    return F.linear(x, weight, bias)
+
+def _ffn(
+    x,
+    fc1,
+    activation_fn,
+    activation_dropout_module,
+    fc2,
+    dropout_module,
+):
+    x_shape = x.shape
+    x = x.reshape(-1, x.size(-1))
+    if has_fused_bias_gelu and activation_fn == gelu:
+        x = _linear(x, fc1.weight)
+        x = fused_bias_gelu(x, fc1.bias)
+        x = activation_dropout_module(x)
+        x = _linear(x, fc2.weight, fc2.bias)
+    else:
+        x = _linear(x, fc1.weight, fc1.bias)
+        x = activation_fn(x)
+        x = activation_dropout_module(x)
+        x = _linear(x, fc2.weight, fc2.bias)
+    x = x.view(x_shape)
+    x = dropout_module(x)
+    return x
+
+
+class FeedForwardNetwork(nn.Module):
+    """
+        Feed Forward Network layer in the Transformer model
+    """
+    def __init__(self, args, embed_dim, ffn_dim, dropout_module=None):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.quant_noise = getattr(args, "quant_noise_pq", 0)
+        self.quant_noise_block_size = getattr(args, "quant_noise_pq_block_size", 8)
+        self.activation_fn = utils.get_activation_fn(
+            activation=str(args.activation_fn)
+            if getattr(args, "activation_fn", None) is not None
+            else "relu"
+        )
+        activation_dropout_p = getattr(args, "activation_dropout", 0) or 0
+        if activation_dropout_p == 0:
+            # for backwards compatibility with models that use args.relu_dropout
+            activation_dropout_p = getattr(args, "relu_dropout", 0) or 0
+        self.activation_dropout_module = FairseqDropout(
+            float(activation_dropout_p), module_name=self.__class__.__name__
+        )
+        self.fc1 = self.build_fc1(
+            self.embed_dim,
+            ffn_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.fc2 = self.build_fc2(
+            ffn_dim,
+            self.embed_dim,
+            self.quant_noise,
+            self.quant_noise_block_size,
+        )
+        self.dropout_module = FairseqDropout(
+                args.dropout, module_name=self.__class__.__name__
+            ) if not dropout_module else dropout_module
+
+    def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(
+            nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
+        )
+
+    def build_fc2(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(
+            nn.Linear(input_dim, output_dim), p=q_noise, block_size=qn_block_size
+        )
+
+    def forward(self, x):
+        return _ffn(
+            x,
+            fc1=self.fc1,
+            activation_fn=self.activation_fn,
+            activation_dropout_module=self.activation_dropout_module,
+            fc2=self.fc2,
+            dropout_module=self.dropout_module,
+        )
+        return x
+
+def make_experts(args, embed_dim, expert_ffn_dim, dropout_module, is_encoder=False) -> nn.ModuleList:
+    world_size = 1 if not torch.distributed.is_initialized() else torch.distributed.get_world_size()
+    expert_list = []
+    ddp_rank = dist_utils.get_data_parallel_rank()
+    start_seed = torch.randint(1000000, (1,)).item()
+    # at least as many experts than gpus
+    if args.moe_expert_count >= world_size:
+        if is_encoder:
+            local_moe_expert_count = max(args.moe_expert_count, args.moe_encoder_expert_count) // world_size
+        else:
+            local_moe_expert_count = max(args.moe_expert_count, args.moe_decoder_expert_count) // world_size
+        for i in range(local_moe_expert_count):
+            with utils.set_torch_seed(start_seed + ddp_rank * local_moe_expert_count + i):
+                expert_list.append(FeedForwardNetwork(args, embed_dim, expert_ffn_dim, dropout_module))
+    # less experts than gpus
+    else:
+        assert world_size % args.moe_expert_count == 0, f'{world_size}, {args.moe_expert_count}'
+        # initialize each FFN with the same seed on different GPUs
+        with utils.set_torch_seed(start_seed + ddp_rank % args.moe_expert_count):
+            expert_list.append(FeedForwardNetwork(args, embed_dim, expert_ffn_dim, dropout_module))
+    experts = nn.ModuleList(expert_list)
+    return experts
+
 @register_model_architecture("unify_transformer", "unify_transformer")
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, "encoder_embed_path", None)
@@ -1593,3 +1747,4 @@ def base_architecture(args):
     args.selected_expert_count = getattr(args, "selected_expert_count", 2)
     args.moe_expert_count = getattr(args, "moe_expert_count", 2)
     args.moe_gating_use_fp32 = getattr(args, "moe_gating_use_fp32", True)
+    args.moe_top1_expert = getattr(args, "moe_top1_expert", False)
