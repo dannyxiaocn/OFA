@@ -14,7 +14,7 @@ from fairseq import metrics, utils
 from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
-
+from fairseq.modules.moe import MOELayer
 from data import data_utils
 from utils.cider.pyciderevalcap.ciderD.ciderD import CiderD
 
@@ -135,6 +135,7 @@ class ScstRewardMOECriterion(FairseqCriterion):
         logging_output = {
             "loss": loss.data,
             "moe_loss": moe_loss.data,
+            "inner_loss": loss.data - moe_loss.data,
             "score": score,
             "ntokens": ntokens,
             "nsentences": nsentences,
@@ -296,14 +297,14 @@ class ScstRewardMOECriterion(FairseqCriterion):
             gate_loss = gate_loss / gate_count
         if self.gate_loss_transform == "neg_log":
             gate_loss = - torch.log(gate_loss)
-        gate_loss = sample_size * gate_loss
+        gate_loss = ntokens * gate_loss
         loss += self.gate_loss_weight * gate_loss
 
         return loss, gate_loss, scores.sum(), ntokens, nsentences
 
     def get_moe_metadata(self, model):
         moe_logging_output = {}
-        for key in AdjustLabelSmoothedMOECrossEntropyCriterion.moe_logging_keys:
+        for key in ScstRewardMOECriterion.moe_logging_keys:
             total_val = 0
             count = 0
             for _, module in model.named_modules():
@@ -323,6 +324,7 @@ class ScstRewardMOECriterion(FairseqCriterion):
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
         moe_loss_sum = sum(log.get("moe_loss", 0) for log in logging_outputs)
+        inner_loss = sum(log.get("inner_loss", 0) for log in logging_outputs)
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
@@ -341,7 +343,10 @@ class ScstRewardMOECriterion(FairseqCriterion):
             "sample_size", sample_size, 1, round=3
         )
         metrics.log_scalar(
-            "moe_gate_loss", moe_loss_sum / sample_size, sample_size, round=8
+            "moe_gate_loss", moe_loss_sum / sample_size, sample_size, round=3
+        )
+        metrics.log_scalar(
+            "inner_loss", inner_loss / sample_size, sample_size, round=3
         )
 
     @staticmethod
