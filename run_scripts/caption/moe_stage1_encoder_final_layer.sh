@@ -13,7 +13,7 @@ user_dir=../../ofa_module
 
 data_dir=../../dataset/caption_data
 data=${data_dir}/caption_stage1_train.tsv,${data_dir}/caption_val.tsv
-restore_file=../../checkpoints/ofa_base.pt
+restore_file=./moe_en_final_layer_stage1_checkpoints/2_0.06_2500_1_2e-5/checkpoint_last.pt
 selected_cols=0,4,2
 
 task=caption
@@ -41,7 +41,7 @@ moe_combine_method="sum"
 moe_second_expert_policy="all"
 moe_normalize_expert_grad="sqrt_world_size"
 
-for max_epoch in {2,}; do
+for max_epoch in {5,}; do
   echo "max_epoch "${max_epoch}
   for warmup_ratio in {0.06,}; do
     echo "warmup_ratio "${warmup_ratio}
@@ -58,7 +58,6 @@ for max_epoch in {2,}; do
           --bpe-dir=${bpe_dir} \
           --user-dir=${user_dir} \
           --restore-file=${restore_file} \
-          --reset-optimizer --reset-dataloader --reset-meters \
           --save-dir=${save_path} \
           --task=${task} \
           --arch=${arch} \

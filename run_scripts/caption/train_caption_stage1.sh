@@ -2,7 +2,7 @@
 
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
-export MASTER_PORT=2051
+export MASTER_PORT=1051
 
 log_dir=./stage1_logs
 save_dir=./stage1_checkpoints
@@ -13,7 +13,7 @@ user_dir=../../ofa_module
 
 data_dir=../../dataset/caption_data
 data=${data_dir}/caption_stage1_train.tsv,${data_dir}/caption_val.tsv
-restore_file=../../checkpoints/ofa_base.pt
+restore_file=./stage1_checkpoints/2_0.06_2500/checkpoint_last.pt
 selected_cols=0,4,2
 
 task=caption
@@ -37,7 +37,7 @@ patch_image_size=480
 eval_cider_cached=${data_dir}/cider_cached_tokens/coco-valid-words.p
 drop_worst_ratio=0.2
 
-for max_epoch in {2,}; do
+for max_epoch in {3,}; do
   echo "max_epoch "${max_epoch}
   for warmup_ratio in {0.06,}; do
     echo "warmup_ratio "${warmup_ratio}
@@ -48,7 +48,7 @@ for max_epoch in {2,}; do
       save_path=${save_dir}/${max_epoch}"_"${warmup_ratio}"_"${drop_worst_after}
       mkdir -p $save_path
 
-      CUDA_VISIBLE_DEVICES=1,2 python3 -m torch.distributed.launch --nproc_per_node=2 --master_port=${MASTER_PORT} ../../train.py \
+      CUDA_VISIBLE_DEVICES=0 python3 -m torch.distributed.launch --nproc_per_node=1 --master_port=${MASTER_PORT} ../../train.py \
           $data \
           --selected-cols=${selected_cols} \
           --bpe-dir=${bpe_dir} \
@@ -80,7 +80,7 @@ for max_epoch in {2,}; do
           --moe-freq=0 \
           --encoder-moe-freq=0 \
           --decoder-moe-freq=0 \
-          --log-format=simple --log-interval=10 \
+          --log-format=simple --log-interval=1 \
           --fixed-validation-seed=7 \
           --no-epoch-checkpoints --keep-best-checkpoints=1 \
           --save-interval=1 --validate-interval=1 \
