@@ -338,6 +338,8 @@ class TransformerEncoderLayer(nn.Module):
 
     def moe_checkpoint_loader(self, name, state_dict, noise_coef=0):
 
+        print("ERROR: Loading with inapproriate part")
+
         n_experts = self.args.moe_expert_count // torch.distributed.get_world_size()
         # get fc1_weights, fc2_weights, fc1_bias, fc2_bias
         fc1_weights = state_dict["{}.fc1.weight".format(name)]
@@ -380,6 +382,8 @@ class TransformerEncoderLayer(nn.Module):
                         "{}.{}.{}".format(name, new, m)
                     ] = self.state_dict()["{}.{}".format(new, m)]
 
+        # for param_tensor in state_dict:
+        #     print("{}.{}".format(name, param_tensor))
         moe_checker = "{}.moe_layer.gate.wg.weight".format(name)
         if moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
             self.moe_checkpoint_loader(name, state_dict)
@@ -832,6 +836,8 @@ class TransformerDecoderLayer(nn.Module):
 
     def moe_checkpoint_loader(self, name, state_dict, noise_coef=0):
 
+        print("ERROR: Loading with inapproriate part")
+
         n_experts = self.args.moe_expert_count // torch.distributed.get_world_size()
         # get fc1_weights, fc2_weights, fc1_bias, fc2_bias
         fc1_weights = state_dict["{}.fc1.weight".format(name)]
@@ -881,6 +887,8 @@ class TransformerDecoderLayer(nn.Module):
                         "{}.{}.{}".format(name, new, m)
                     ] = self.state_dict()["{}.{}".format(new, m)]
 
+        # for param_tensor in state_dict:
+        #     print("{}.{}".format(name, param_tensor))
         moe_checker = "{}.moe_layer.gate.wg.weight".format(name)
         if moe_checker not in state_dict and "moe_layer.gate.wg.weight" in self.state_dict():
             self.moe_checkpoint_loader(name, state_dict)
