@@ -535,7 +535,7 @@ class TransformerEncoder(FairseqEncoder):
             self.layers = nn.ModuleList([])
 
         dpr = [x.item() for x in torch.linspace(0, args.encoder_drop_path_rate, args.encoder_layers)]
-        if getattr(args, 'moe_encoder_expert_count', 4): is_shared_moe = None
+        if getattr(args, 'moe_encoder_expert_count', 0) == 0: is_shared_moe = None
         else: 
             if args.moe_top1_expert:
                 gate = Top1Gate(
@@ -554,7 +554,7 @@ class TransformerEncoder(FairseqEncoder):
                     getattr(args, "moe_eval_capacity_token_fraction", 0.25),
                     getattr(args, "moe_batch_prioritized_routing", False),
                 )
-            experts = make_experts(args, args.encoder_embed_dim, args.encoder_ffn_embed_dim, FairseqDropout(args.dropout, module_name=self.__class__.__name__))
+            experts = make_experts(args, args.encoder_embed_dim, args.encoder_ffn_embed_dim, FairseqDropout(args.dropout, module_name=self.__class__.__name__), is_encoder=True)
             is_shared_moe = MOELayer(gate, experts, args)
         self.shared_moe = is_shared_moe
         for i in range(args.encoder_layers):
@@ -1090,7 +1090,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layers = nn.ModuleList([])
 
         dpr = [x.item() for x in torch.linspace(0, args.decoder_drop_path_rate, args.decoder_layers)]
-        if getattr(args, 'moe_decoder_expert_count', 4) == 0: is_shared_moe = None
+        if getattr(args, 'moe_decoder_expert_count', 0) == 0: is_shared_moe = None
         else: 
             if args.moe_top1_expert:
                 gate = Top1Gate(
