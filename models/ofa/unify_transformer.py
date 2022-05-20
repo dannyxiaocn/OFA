@@ -299,6 +299,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
                                  "if set to negative, use same as training. range: (0.0, 1.0].")
         parser.add_argument('--moe-normalize-expert-grad', type=str, default='world_size',
                             help="Divide expert gradients by (1) 'world_size' (2) 'sqrt_world_size'")
+        parser.add_argument('--moe-gate-loss-wt', type=float, default=0.1,
+                            help="Divide expert gradients by (1) 'world_size' (2) 'sqrt_world_size'")
         parser.add_argument('--use-moe-pad-mask', default=True, action='store_true',
                             help="Don't route padding tokens to any expert")
         # args for pseudo-MoE layers

@@ -836,8 +836,6 @@ class TransformerDecoderLayer(nn.Module):
 
     def moe_checkpoint_loader(self, name, state_dict, noise_coef=0):
 
-        print("ERROR: Loading with inapproriate part")
-
         n_experts = self.args.moe_expert_count // torch.distributed.get_world_size()
         # get fc1_weights, fc2_weights, fc1_bias, fc2_bias
         fc1_weights = state_dict["{}.fc1.weight".format(name)]
